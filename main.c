@@ -1,44 +1,87 @@
 #include <raylib.h>
 #include <stdio.h>
 
+typedef struct
+{
+    int screenWidth;
+    int screenHeight;
+    int fps;
+    const char *name;
+} GameConfig;
+
 typedef enum
 {
     LEFT,
     RIGHT,
+    UP,
+    DOWN,
+    NONE
 } Direction;
 
 typedef struct
 {
     Vector2 ballPos;
     float ballSpeed;
-    Direction currentDir;
+    Direction xDir;
+    Direction yDir;
     float radius;
     Color color;
 } Ball;
 
 typedef struct
 {
+    Rectangle player;
+    Rectangle computer;
     Ball ball;
     int playerScore;
     int computerScore;
 } GameState;
 
+typedef struct
+{
+    bool hitPlayer;
+    bool hitComputer;
+    bool hitWall;
+    bool hitPlayerGoal;
+    bool hitComputerGoal;
+} CollisionResult;
+
+typedef enum
+{
+    PLAYER,
+    COMPUTER,
+} Side;
+
+typedef enum
+{
+    HORIZONTAL,
+    VERTICAL,
+} Component;
+
 void movePlayer(struct Rectangle *rec, int upKey, int downKey);
-void renderMiddleLine();
+void renderMiddleLine(int screenWidth, int screenHeight);
 void renderScore(int playerScore, int computerScore);
+void renderDirections(GameState state);
 void moveBall(Ball *ball);
-void updateScore(int *score);
-void resetBall(Vector2 *ball);
-void checkCollisions(Rectangle *player, Rectangle *computer, GameState *game);
+void updateBallTrajectory(CollisionResult result, GameState *state, int recHeight);
+void updateScore(int *playerScore, int *computerScore, CollisionResult result);
+void resetBall(GameState *state, CollisionResult result);
+CollisionResult checkCollisions(Rectangle *player, Rectangle *computer, GameState *state, GameConfig gameConfig);
+bool checkCollisionCircleWall(Ball ball, GameConfig gameConfig);
+bool checkCollisionCircleGoal(Ball ball, GameConfig gameConfig, Side side);
+void changeDirectionAxis(Ball *ball, Component axis);
+void changeDirectionDir(Ball *ball, Direction dir);
 
 int main()
 {
-    // window
     const int SCREEN_WIDTH = 800;
     const int SCREEN_HEIGHT = 450;
+    const int FPS = 120;
+    const char *NAME = "Pong";
+    GameConfig gameConfig = {SCREEN_WIDTH, SCREEN_HEIGHT, FPS, NAME};
 
-    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Pong");
-    SetTargetFPS(120);
+    InitWindow(gameConfig.screenWidth, gameConfig.screenHeight, gameConfig.name);
+    SetTargetFPS(gameConfig.fps);
 
     // shapes
     const int RECTANGLE_WIDTH = 20;
@@ -56,28 +99,33 @@ int main()
     struct Vector2 ballPos = {(float)SCREEN_WIDTH / 2, (float)SCREEN_HEIGHT / 2};
 
     int playerScore = 0, computerScore = 0;
-    Direction currentDir = RIGHT;
+    Direction X_DIR = RIGHT;
+    Direction Y_DIR = NONE;
 
-    Ball ball = {ballPos, BALL_SPEED, currentDir, BALL_RADIUS, BALL_COLOR};
-    GameState game = {ball, playerScore, computerScore};
+    Ball ball = {ballPos, BALL_SPEED, X_DIR, Y_DIR, BALL_RADIUS, BALL_COLOR};
+    GameState state = {player, computer, ball, playerScore, computerScore};
 
     while (!WindowShouldClose())
     {
         movePlayer(&player, KEY_UP, KEY_DOWN);
         movePlayer(&computer, KEY_W, KEY_S);
-        moveBall(&ball);
-        checkCollisions(&player, &computer, &game);
+        moveBall(&state.ball);
+        CollisionResult result = checkCollisions(&player, &computer, &state, gameConfig);
+        updateBallTrajectory(result, &state, RECTANGLE_HEIGHT);
+        updateScore(&state.playerScore, &state.computerScore, result);
+        resetBall(&state, result);
 
         BeginDrawing();
 
         // map setup
         ClearBackground(BLACK);
-        renderMiddleLine();
-        renderScore(playerScore, computerScore);
+        renderMiddleLine(SCREEN_WIDTH, SCREEN_HEIGHT);
+        renderScore(state.playerScore, state.computerScore);
+        renderDirections(state);
 
         DrawRectangleRec(computer, WHITE);
         DrawRectangleRec(player, WHITE);
-        DrawCircleV(ball.ballPos, ball.radius, ball.color);
+        DrawCircleV(state.ball.ballPos, state.ball.radius, state.ball.color);
 
         EndDrawing();
     }
@@ -87,13 +135,26 @@ int main()
     return 0;
 }
 
-void renderMiddleLine()
+void renderDirections(GameState gameState)
 {
-    int middleLineY = 0;
-    while (middleLineY < 450)
+    char xDir[64];
+    char yDir[64];
+
+    snprintf(xDir, sizeof(xDir), "%d\n", gameState.ball.xDir);
+    snprintf(yDir, sizeof(yDir), "%d\n", gameState.ball.yDir);
+    DrawText(xDir, 300, 200, 20, WHITE);
+    DrawText(yDir, 360, 200, 20, WHITE);
+}
+
+void renderMiddleLine(int screenWidth, int screenHeight)
+{
+    int posY = 0;
+    int fontSize = 20;
+
+    while (posY < screenHeight)
     {
-        DrawText("|", 400, middleLineY, 20, WHITE);
-        middleLineY += 25;
+        DrawText("|", screenWidth / 2, posY, fontSize, WHITE);
+        posY += 25;
     }
 }
 
@@ -101,77 +162,183 @@ void renderScore(int playerScore, int computerScore)
 {
     char playerText[32];
     char computerText[32];
+    int playerScorePosX = 465, computerScorePosX = 300;
+    int posY = 50;
+    int fontSize = 80;
 
     sprintf(playerText, "%d", playerScore);
     sprintf(computerText, "%d", computerScore);
 
-    DrawText(playerText, 500, 50, 80, WHITE);
-    DrawText(computerText, 270, 50, 80, WHITE);
+    DrawText(playerText, playerScorePosX, posY, fontSize, WHITE);
+    DrawText(computerText, computerScorePosX, posY, fontSize, WHITE);
 }
 
 void movePlayer(Rectangle *rec, int upKey, int downKey)
 {
     if (IsKeyDown(upKey) && rec->y > 0)
+    {
         rec->y -= 5;
+    }
     else if (IsKeyDown(downKey) && rec->y < 350)
+    {
         rec->y += 5;
+    }
 }
 
 void moveBall(Ball *ball)
 {
     float deltaTime = GetFrameTime();
+    float distance = ball->ballSpeed * deltaTime;
 
-    if (ball->currentDir == RIGHT)
+    if (ball->xDir == RIGHT)
     {
-        ball->ballPos.x += ball->ballSpeed * deltaTime;
-        ball->ballPos.y += ball->ballSpeed * deltaTime;
+        ball->ballPos.x += distance;
     }
     else
     {
-        ball->ballPos.x -= ball->ballSpeed * deltaTime;
-        ball->ballPos.y -= ball->ballSpeed * deltaTime;
+        ball->ballPos.x -= distance;
+    }
+
+    if (ball->yDir == NONE)
+    {
+        return;
+    }
+
+    if (ball->yDir == UP)
+    {
+        ball->ballPos.y -= distance;
+    }
+    else
+    {
+        ball->ballPos.y += distance;
     }
 }
 
-void checkCollisions(Rectangle *player, Rectangle *computer, GameState *game)
+CollisionResult checkCollisions(Rectangle *player, Rectangle *computer, GameState *gameState, GameConfig gameConfig)
 {
-    bool ballHitRec;
-    bool ballHitWall;
+    CollisionResult result;
 
-    if (game->ball.currentDir == RIGHT)
+    result.hitWall = checkCollisionCircleWall(gameState->ball, gameConfig);
+    result.hitPlayerGoal = checkCollisionCircleGoal(gameState->ball, gameConfig, PLAYER);
+    result.hitComputerGoal = checkCollisionCircleGoal(gameState->ball, gameConfig, COMPUTER);
+    result.hitPlayer = CheckCollisionCircleRec(gameState->ball.ballPos, gameState->ball.radius, *player);
+    result.hitComputer = CheckCollisionCircleRec(gameState->ball.ballPos, gameState->ball.radius, *computer);
+
+    return result;
+}
+
+void changeDirectionAxis(Ball *ball, Component axis)
+{
+    if (axis == HORIZONTAL)
     {
-        ballHitRec = CheckCollisionCircleRec(game->ball.ballPos, game->ball.radius, *player);
-        if (ballHitRec)
+        if (ball->xDir == RIGHT)
         {
-            game->ball.currentDir = LEFT;
+            ball->xDir = LEFT;
         }
-
-        if (game->ball.ballPos.x >= 800)
+        else
         {
-            updateScore(&game->computerScore);
-            resetBall(&game->ball.ballPos);
+            ball->xDir = RIGHT;
         }
     }
     else
     {
-        ballHitRec = CheckCollisionCircleRec(game->ball.ballPos, game->ball.radius, *computer);
-        if (ballHitRec)
+        if (ball->yDir == UP)
         {
-            game->ball.currentDir = RIGHT;
+            ball->yDir = DOWN;
         }
-
-        if (game->ball.ballPos.x <= 0)
+        else
         {
-            updateScore(&game->playerScore);
-            resetBall(&game->ball.ballPos);
+            ball->yDir = UP;
         }
     }
 }
 
-void updateScore(int *score) { (*score)++; }
-
-void resetBall(Vector2 *ball)
+void changeDirectionDir(Ball *ball, Direction dir)
 {
-    ball->x = 400;
-    ball->y = 225;
+    if (dir == UP)
+    {
+        ball->yDir = UP;
+    }
+    else
+    {
+        ball->yDir = DOWN;
+    }
+}
+
+bool checkCollisionCircleWall(Ball ball, GameConfig gameConfig)
+{
+    return (ball.ballPos.y <= 0 || ball.ballPos.y >= 450);
+}
+
+bool checkCollisionCircleGoal(Ball ball, GameConfig gameConfig, Side side)
+{
+    if (side == PLAYER)
+    {
+        return ball.ballPos.x >= 800;
+    }
+    else
+    {
+        return ball.ballPos.x <= 0;
+    }
+}
+
+void updateBallTrajectory(CollisionResult result, GameState *state, int recHeight)
+{
+    if (result.hitWall)
+    {
+        changeDirectionAxis(&state->ball, VERTICAL);
+    }
+    else if (result.hitPlayer || result.hitComputer)
+    {
+        if (state->ball.xDir == RIGHT)
+        {
+            if (state->ball.ballPos.y >= state->player.y &&
+                state->ball.ballPos.y < state->player.y + (float)recHeight / 2 - 5)
+            {
+                changeDirectionDir(&state->ball, UP);
+            }
+            else if (state->ball.ballPos.y > state->player.y + (float)recHeight / 2 + 5 &&
+                     state->ball.ballPos.y <= state->player.y + recHeight)
+            {
+                changeDirectionDir(&state->ball, DOWN);
+            }
+        }
+        else
+        {
+            if (state->ball.ballPos.y >= state->computer.y &&
+                state->ball.ballPos.y < state->computer.y + ((float)recHeight / 2 + 5))
+            {
+                changeDirectionDir(&state->ball, UP);
+            }
+            else if (state->ball.ballPos.y > state->computer.y + ((float)recHeight / 2 + 5) &&
+                     state->ball.ballPos.y <= state->computer.y + recHeight)
+            {
+                changeDirectionDir(&state->ball, DOWN);
+            }
+        }
+
+        changeDirectionAxis(&state->ball, HORIZONTAL);
+    }
+}
+
+void updateScore(int *playerScore, int *computerScore, CollisionResult result)
+{
+    if (result.hitPlayerGoal)
+    {
+        (*computerScore)++;
+    }
+    else if (result.hitComputerGoal)
+    {
+        (*playerScore)++;
+    }
+}
+
+void resetBall(GameState *state, CollisionResult result)
+{
+    if (result.hitComputerGoal || result.hitPlayerGoal)
+    {
+        state->ball.ballPos.x = 400;
+        state->ball.ballPos.y = 225;
+        state->ball.yDir = NONE;
+    }
 }
